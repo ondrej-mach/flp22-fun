@@ -1,3 +1,2 @@
- 
 all:
-	ghc src/main.hinstall s -Wall -o flp22-fun
+	ghc src/Main.hs -Wall -o flp22-fun
