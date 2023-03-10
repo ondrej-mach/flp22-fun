@@ -11,6 +11,9 @@ import Text.Parsec.Char
 import Text.Parsec.String
 import Data.Functor.Identity
 
+coordBitLength = 256
+signatureBitLength = 256
+
 
 ---------------------------- CUSTOM DATA TYPES -------------------------------
 
@@ -33,7 +36,7 @@ data Key = Key {
     q_key :: Integer
 } deriving (Read)
 
-data Hash = Integer
+type Hash = Integer
 
 data Signature = Signature {
     r :: Integer,
@@ -43,7 +46,6 @@ data Signature = Signature {
 data PublicKey = PublicKey {
     q_pubkey :: Integer
 } deriving (Read)
-
 
 ----------------------------- SHOW FUNCTIONS -----------------------------------
 
@@ -74,6 +76,9 @@ instance Show Curve where
 
 instance Show Key where
     show (Key d q_key) = printf "Key {\nd: 0x%x\nQ: 0x%0130x\n}" d q_key
+
+instance Show Signature where
+    show (Signature r s) = printf "Signature {\nr: 0x%x\ns: 0x%x\n}" r s
 
 show0xHex :: Integer -> String
 show0xHex n = "0x" ++ showHex n ""
@@ -147,6 +152,34 @@ curveParser = do
         y = getIntAttr "y" pointBlock
     return (Curve p a b (Point x y) n h)
 
+keyParser :: Parser Key
+keyParser = do
+    struct <- compoundValueParser
+    let CompoundValue dt block = struct
+        d = getIntAttr "d" block
+        q_key = getIntAttr "Q" block
+    return (Key d q_key)
+
+hashParser :: Parser Hash
+hashParser = do
+    (key, SimpleValue value) <- keyValueParser
+    return $ read value
+
+pubkeyParser :: Parser PublicKey
+pubkeyParser = do
+    struct <- compoundValueParser
+    let CompoundValue dt block = struct
+        q_pubkey = getIntAttr "Q" block
+    return $ PublicKey q_pubkey
+
+signatureParser :: Parser Signature
+signatureParser = do
+    struct <- compoundValueParser
+    let CompoundValue dt block = struct
+        r = getIntAttr "r" block
+        s = getIntAttr "s" block
+    return $ Signature r s
+
 
 examplePoint = Point {
     x=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
@@ -217,6 +250,44 @@ pointMult curve k point = result
                     else prevRes
             in (newRes, newTemp)
 
+bitCount :: Integer -> Integer
+bitCount n
+    | n > 0 = 1 + bitCount (n `div` 2)
+    | otherwise = 0
+
+-- Get hash to normalized length
+hashConvert :: Integer -> Integer
+hashConvert hash
+    | bitCount hash <= signatureBitLength = hash
+    | otherwise = hash `shift` (fromInteger (signatureBitLength - bitCount hash))
+
+signHash :: Curve -> Key -> Hash -> Integer -> Signature
+signHash curve (Key d q_key) hash k =
+    let (Curve p a b g n h) = curve
+        z = hashConvert hash
+        (Point x1 y1) = pointMult curve k g
+        r = x1 `mod` n
+        s = ((inverse k p) * (z + r*d)) `mod` n
+    in (Signature r s)
+
+signatureValid :: Curve -> Signature -> PublicKey -> Hash -> Bool
+signatureValid curve (Signature r s) (PublicKey q_pubkey) hash =
+    let (Curve p a b g n h) = curve
+        pubkeyPoint = pubKeyToPoint q_pubkey
+        (Point x y) = pubkeyPoint
+        coordsOK = x/=0 && y/=0
+        onCurve = (x^3 + a*x + b - y^2) `mod` p == 0
+        multOK = pointMult curve n pubkeyPoint == InfPoint
+        rsInRange = r > 0 && r < n && s > 0 && s < n
+        z = hashConvert hash
+        s_inv = inverse s n
+        u1 = (z * s_inv) `mod` n
+        u2 = (r * s_inv) `mod` n
+        p1 = pointMult curve u1 g
+        p2 = pointMult curve u2 pubkeyPoint
+        (Point x_res y_res) = pointAdd curve p1 p2
+        resultMatching = x_res `mod` n == r
+    in coordsOK && onCurve && multOK && resultMatching
 
 pointToPubKey :: Point -> Integer
 pointToPubKey (Point x1 y1) = prefix .|. x_out .|. y_out
@@ -225,6 +296,15 @@ pointToPubKey (Point x1 y1) = prefix .|. x_out .|. y_out
         prefix = shift 0x40 (bits_per_coord * 2)
         x_out = shift x1 bits_per_coord
         y_out = y1
+
+pubKeyToPoint :: Integer -> Point
+pubKeyToPoint pubkey = Point x y
+    where
+        x = coordBitLengthMask .&. shiftR pubkey coordBitLength
+        y = coordBitLengthMask .&. pubkey
+
+coordBitLengthMask :: Integer
+coordBitLengthMask = foldl (\ acc x -> acc .|. shift 1 x) 0 [0 .. (coordBitLength - 1)]
 
 -- This function makes longer randowm numbers than standard random
 -- It makes the private key the correct lenght, but the entropy is bad
@@ -241,20 +321,69 @@ getLongerRandom gen = foldl helper 0 randomList
 
 actionInput :: String -> IO ()
 actionInput input = do
-    let (Right curve) = runIdentity $ runParserT curveParser () "" input
-    putStrLn $ show curve
+    let result = runIdentity $ runParserT curveParser () "" input
+    case result of
+        Left err -> putStrLn $ "Parser error: " ++ show err
+        Right curve -> putStrLn $ show curve
+
 
 actionKeygen :: String -> IO ()
 actionKeygen input = do
-    gen <- getStdGen -- This random is total crap and should not be used for cryptography
+    let result = runIdentity $ runParserT curveParser () "" input
+    case result of
+        Left err -> putStrLn $ "Parser error: " ++ show err
+        Right curve -> do
+            gen <- getStdGen -- This random is total crap and should not be used for cryptography
+            let Curve p a b g n h = curve
+                d = getLongerRandom gen
+                q = pointToPubKey $ pointMult curve d g
+                key = Key d q
+            putStrLn $ show key
 
-    let (Right curve) = runIdentity $ runParserT curveParser () "" input
-        Curve p a b g n h = curve
-        d = getLongerRandom gen
-        q = pointToPubKey $ pointMult curve d g
-        key = Key d q
 
-    putStrLn $ show key
+actionSignature :: String -> IO ()
+actionSignature input = do
+        let result = runIdentity $ runParserT parser () "" input
+        case result of
+            Left err -> putStrLn $ "Parser error: " ++ show err
+            Right (curve, key, hash) -> do
+                gen <- getStdGen
+                let k = getLongerRandom gen
+                    signature = signHash curve key hash k
+                putStrLn $ show signature
+    where
+        parser = do
+            spaces
+            curve <- curveParser
+            spaces
+            key <- keyParser
+            spaces
+            hash <- hashParser
+            spaces
+            eof
+            return (curve, key, hash)
+
+
+actionVerify :: String -> IO ()
+actionVerify input = do
+        let result = runIdentity $ runParserT parser () "" input
+        case result of
+            Left err -> putStrLn $ "Parser error: " ++ show err
+            Right (curve, signature, pubkey, hash) -> do
+                putStrLn $ show $ signatureValid curve signature pubkey hash
+    where
+        parser = do
+            spaces
+            curve <- curveParser
+            spaces
+            signature <- signatureParser
+            spaces
+            pubkey <- pubkeyParser
+            spaces
+            hash <- hashParser
+            spaces
+            eof
+            return (curve, signature, pubkey, hash)
 
 
 dispatch :: [(String, String -> IO ())]
@@ -264,10 +393,7 @@ dispatch = [("-i", actionInput),
             ("-v", actionVerify)]
 
 
-
-actionSignature = actionInput
-actionVerify = actionInput
-
+main :: IO ()
 main = do
     (command:args) <- getArgs
     let (Just action) = lookup command dispatch
