@@ -116,7 +116,13 @@ blockParser :: Parser Block
 blockParser = do
     string "{"
     spaces
-    list <- many (keyValueParser <* spaces)
+    -- list <- many (keyValueParser <* spaces)
+    -- Workaround for old version of Parsec
+    list <- many (do
+                kv <- keyValueParser
+                spaces
+                return kv
+             )
     string "}"
     return list
 
@@ -306,16 +312,6 @@ pubKeyToPoint pubkey = Point x y
 coordBitLengthMask :: Integer
 coordBitLengthMask = foldl (\ acc x -> acc .|. shift 1 x) 0 [0 .. (coordBitLength - 1)]
 
--- This function makes longer randowm numbers than standard random
--- It makes the private key the correct lenght, but the entropy is bad
--- It should be never used in practice
-getLongerRandom :: StdGen -> Integer
-getLongerRandom gen = foldl helper 0 randomList
-    where
-        randomList = take 4 $ randoms gen :: [Word]
-        helper acc x = (shift acc 64) `xor` (fromIntegral x)
-
-
 
 --------------------------- MAIN -----------------------------
 
@@ -333,9 +329,9 @@ actionKeygen input = do
     case result of
         Left err -> putStrLn $ "Parser error: " ++ show err
         Right curve -> do
-            gen <- getStdGen -- This random is total crap and should not be used for cryptography
+            gen <- getStdGen -- This random generator is not good enough for crypto
             let Curve p a b g n h = curve
-                d = getLongerRandom gen
+                (d, _) = randomR (1, (n-1)) gen :: (Integer, StdGen)
                 q = pointToPubKey $ pointMult curve d g
                 key = Key d q
             putStrLn $ show key
@@ -348,7 +344,8 @@ actionSignature input = do
             Left err -> putStrLn $ "Parser error: " ++ show err
             Right (curve, key, hash) -> do
                 gen <- getStdGen
-                let k = getLongerRandom gen
+                let Curve p a b g n h = curve
+                    (k, _) = randomR (1, (n-1)) gen :: (Integer, StdGen)
                     signature = signHash curve key hash k
                 putStrLn $ show signature
     where
