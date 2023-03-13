@@ -273,7 +273,7 @@ signHash curve (Key d q_key) hash k =
         z = hashConvert hash
         (Point x1 y1) = pointMult curve k g
         r = x1 `mod` n
-        s = ((inverse k p) * (z + r*d)) `mod` n
+        s = ((inverse k n) * (z + r*d)) `mod` n
     in (Signature r s)
 
 signatureValid :: Curve -> Signature -> PublicKey -> Hash -> Bool
